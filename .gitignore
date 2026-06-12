@@ -1,0 +1,12 @@
+﻿# Ignorar TODAS las carpetas (para no subir las descargas)
+*/
+
+# Ignorar archivos sensibles, temporales y notas
+cookies*
+log*
+links*
+contexto*
+
+# Ignorar caché de Python
+__pycache__/
+*.pyc
