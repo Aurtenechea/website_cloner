@@ -13,7 +13,8 @@ COOKIES_FILE  = BASE_DIR / "cookies.txt"
 LINKS_FILE    = BASE_DIR / "links.txt"
 LOG_FILE      = BASE_DIR / "log.txt"
 DELAY         = 2
-VIDEO_CALIDAD = "bv*[height<=720]+ba/b[height<=720]"
+# Prefiere MP4 directo antes que HLS cuando esté disponible (evita problemas de fragmentos)
+VIDEO_CALIDAD = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best"
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -256,36 +257,64 @@ def procesar_html_y_adjuntos(session: requests.Session, url: str, leccion_dir: P
 # 5. DESCARGA DE VIDEO
 # ══════════════════════════════════════════════════════════════════════════════
 
+MAX_INTENTOS_VIDEO = 3  # cuántas veces reintentar la descarga si falla
+
 def _correr_ytdlp(url_video: str, output_template: str, label: str):
-    """Corre yt-dlp sobre una URL concreta y loguea el resultado."""
-    log(f"  [video] descargando {label} → {url_video}")
-    try:
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                url_video,
-                "-f", VIDEO_CALIDAD,
-                "--output", output_template,
-                "--cookies", str(COOKIES_FILE),
-                "--no-playlist",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        log(f"  [yt-dlp stdout]\n{result.stdout[-1500:]}")
-        if result.returncode == 0:
-            log(f"  [video ok] {label}")
-            return True
+    """
+    Corre yt-dlp sobre una URL concreta.
+    Si falla por error de red (fragmentos HLS, timeout, etc.), reintenta
+    hasta MAX_INTENTOS_VIDEO veces desde cero — así el video queda completo.
+    """
+    for intento in range(1, MAX_INTENTOS_VIDEO + 1):
+        if intento > 1:
+            log(f"  [video] reintentando ({intento}/{MAX_INTENTOS_VIDEO}) → {label}")
+            time.sleep(5)
         else:
-            log(f"  [error video] código {result.returncode} para {label}")
-            log(f"  [yt-dlp stderr]\n{result.stderr[-1500:]}")
+            log(f"  [video] descargando {label} → {url_video}")
+
+        # Borrar archivo parcial antes de reintentar para empezar limpio
+        import glob as _glob
+        for parcial in _glob.glob(output_template.replace("%(ext)s", "*") + ".part"):
+            try:
+                Path(parcial).unlink()
+            except Exception:
+                pass
+
+        try:
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    url_video,
+                    "-f", VIDEO_CALIDAD,
+                    "--output", output_template,
+                    "--cookies", str(COOKIES_FILE),
+                    "--no-playlist",
+                    "--fragment-retries", "5",
+                    "--retries", "5",
+                    "--socket-timeout", "30",
+                    "--no-part",  # no dejar archivos .part incompletos
+                ],
+                capture_output=True,
+                text=True,
+            )
+            log(f"  [yt-dlp stdout]\n{result.stdout[-1500:]}")
+            if result.returncode == 0:
+                log(f"  [video ok] {label}")
+                return True
+            else:
+                log(f"  [error video] código {result.returncode} — intento {intento}/{MAX_INTENTOS_VIDEO}")
+                log(f"  [yt-dlp stderr]\n{result.stderr[-800:]}")
+                # Si el error no es de red, no tiene sentido reintentar
+                if "Unsupported URL" in result.stderr or "not found" in result.stderr.lower():
+                    break
+        except FileNotFoundError:
+            log("  [error] yt-dlp no encontrado. Instalalo con: pip install yt-dlp")
             return False
-    except FileNotFoundError:
-        log("  [error] yt-dlp no encontrado. Instalalo con: pip install yt-dlp")
-        return False
-    except Exception as e:
-        log(f"  [error inesperado en video] {e}")
-        return False
+        except Exception as e:
+            log(f"  [error inesperado en video] {e}")
+
+    log(f"  [video fallido] No se pudo descargar después de {MAX_INTENTOS_VIDEO} intentos: {label}")
+    return False
 
 
 def descargar_video(soup, html_raw: str, url_leccion: str, curso_slug: str, nombre_video: str):
