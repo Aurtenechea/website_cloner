@@ -10,3 +10,5 @@ contexto*
 # Ignorar caché de Python
 __pycache__/
 *.pyc
+"# Carpetas de cursos descargados" 
+"*/" 
