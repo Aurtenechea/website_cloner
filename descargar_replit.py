@@ -317,16 +317,18 @@ def _correr_ytdlp(url_video: str, output_template: str, label: str):
     return False
 
 
-def descargar_video(soup, html_raw: str, url_leccion: str, curso_slug: str, nombre_video: str):
+def descargar_video(soup, html_raw: str, url_leccion: str, curso_slug: str, nombre_video: str) -> list:
     """
     Estrategia:
       1. Busca URLs de YouTube en el HTML (iframe, data-*, texto crudo).
       2. Si encuentra alguna, descarga cada una con yt-dlp.
       3. Si no hay YouTube, intenta yt-dlp sobre la URL de la lección directamente
          (para videos nativos de LearnDash / Vimeo / etc.).
+    Devuelve lista de (archivo_local: Path, url_fuente: str) para los videos descargados.
     """
     videos_dir = BASE_DIR / curso_slug / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
+    descargados = []  # [(Path, str_url_fuente)]
 
     # ── Buscar videos de YouTube ──────────────────────────────────────────────
     if soup is not None:
@@ -340,28 +342,122 @@ def descargar_video(soup, html_raw: str, url_leccion: str, curso_slug: str, nomb
             sufijo    = f"_yt{idx+1}" if len(yt_urls) > 1 else ""
             plantilla = str(videos_dir / f"{nombre_video}{sufijo}.%(ext)s")
 
-            # Saltar si ya existe
             existentes = list(videos_dir.glob(f"{nombre_video}{sufijo}.*"))
             if existentes:
                 log(f"  [video ya existe] {existentes[0].name}")
+                descargados.append((existentes[0], yt_url))
                 continue
 
-            _correr_ytdlp(yt_url, plantilla, f"YouTube #{idx+1}")
-        return
+            ok = _correr_ytdlp(yt_url, plantilla, f"YouTube #{idx+1}")
+            if ok:
+                encontrados = list(videos_dir.glob(f"{nombre_video}{sufijo}.*"))
+                if encontrados:
+                    descargados.append((encontrados[0], yt_url))
+        return descargados
 
     # ── Sin YouTube: intentar con la URL de la lección (video nativo / Vimeo) ─
     log(f"  [video] No se encontraron iframes de YouTube — intentando URL de lección directamente")
     existentes = list(videos_dir.glob(f"{nombre_video}.*"))
     if existentes:
         log(f"  [video ya existe] {existentes[0].name}")
-        return
+        return [(existentes[0], url_leccion)]
 
     plantilla = str(videos_dir / f"{nombre_video}.%(ext)s")
-    _correr_ytdlp(url_leccion, plantilla, "lección completa")
+    ok = _correr_ytdlp(url_leccion, plantilla, "lección completa")
+    if ok:
+        encontrados = list(videos_dir.glob(f"{nombre_video}.*"))
+        if encontrados:
+            descargados.append((encontrados[0], url_leccion))
+    return descargados
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. PROCESAMIENTO DE UNA LECCIÓN
+# 6. REESCRITURA DE VIDEOS EN EL HTML LOCAL
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _ext_mime(ext: str) -> str:
+    return {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mkv": "video/x-matroska",
+        ".mov": "video/quicktime",
+        ".m4v": "video/mp4",
+    }.get(ext.lower(), "video/mp4")
+
+
+def _video_tag(ruta_relativa: str, ext: str) -> str:
+    mime = _ext_mime(ext)
+    return (
+        f'<video controls style="width:100%;max-width:960px;display:block;margin:1em 0">'
+        f'<source src="{ruta_relativa}" type="{mime}">'
+        f'Tu navegador no soporta video HTML5.'
+        f'</video>'
+    )
+
+
+def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
+    """
+    Lee index.html, reemplaza cada iframe de YouTube/Vimeo (y tags <video>/<source>
+    con URLs remotas) por un <video> local apuntando a ../videos/nombre.ext
+    """
+    if not videos_descargados:
+        return
+
+    html_path = leccion_dir / "index.html"
+    if not html_path.exists():
+        return
+
+    soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+    modificado = False
+
+    for archivo_local, url_fuente in videos_descargados:
+        # Ruta relativa desde {leccion}/index.html → ../videos/archivo.ext
+        ruta_rel = f"../videos/{archivo_local.name}"
+        ext      = archivo_local.suffix
+
+        # ── 1. Iframes de YouTube: buscar por video ID ────────────────────────
+        m_yt = None
+        for pat in YOUTUBE_PATTERNS:
+            m_yt = re.search(pat, url_fuente)
+            if m_yt:
+                break
+
+        if m_yt:
+            vid_id = m_yt.group(1)
+            for iframe in soup.find_all("iframe"):
+                src = iframe.get("src") or iframe.get("data-src") or ""
+                if vid_id in src:
+                    iframe.replace_with(BeautifulSoup(_video_tag(ruta_rel, ext), "html.parser"))
+                    log(f"  [html] iframe YouTube reemplazado → {ruta_rel}")
+                    modificado = True
+            continue
+
+        # ── 2. Iframes de Vimeo ───────────────────────────────────────────────
+        for iframe in soup.find_all("iframe"):
+            src = iframe.get("src") or iframe.get("data-src") or ""
+            if "vimeo.com" in src:
+                iframe.replace_with(BeautifulSoup(_video_tag(ruta_rel, ext), "html.parser"))
+                log(f"  [html] iframe Vimeo reemplazado → {ruta_rel}")
+                modificado = True
+                break
+
+        # ── 3. Tags <video> o <source> con URLs remotas ───────────────────────
+        for tag in soup.find_all(["video", "source"]):
+            src = tag.get("src") or ""
+            if src.startswith("http"):
+                tag["src"] = ruta_rel
+                log(f"  [html] <{tag.name}> src reemplazado → {ruta_rel}")
+                modificado = True
+
+    if modificado:
+        html_path.write_text(soup.prettify(), encoding="utf-8")
+        log(f"  [html] index.html actualizado con videos locales")
+    else:
+        log(f"  [html] No se encontraron iframes de video para reemplazar en el HTML")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. PROCESAMIENTO DE UNA LECCIÓN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def procesar_leccion(session: requests.Session, url: str):
@@ -377,7 +473,8 @@ def procesar_leccion(session: requests.Session, url: str):
     log(f"Carpeta : {leccion_dir}")
 
     soup, html_raw = procesar_html_y_adjuntos(session, url, leccion_dir)
-    descargar_video(soup, html_raw, url, curso_slug, nombre_video)
+    videos_descargados = descargar_video(soup, html_raw, url, curso_slug, nombre_video)
+    reescribir_videos_en_html(leccion_dir, videos_descargados)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

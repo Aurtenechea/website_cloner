@@ -10,7 +10,7 @@ COOKIES_FILE = BASE_DIR / "cookies.txt"
 LINKS_FILE   = BASE_DIR / "links_autocreado.txt"
 
 # Pegá acá la URL de la página de índice del curso
-URL_INDICE = "https://cresciente.net/cursos/lecto-escritura-musical-i/"
+URL_INDICE = "https://cresciente.net/cursos/teoria-musical-basica-en-50-lecciones/"
 # ──────────────────────────────────────────────────────────────────────────────
 
 
