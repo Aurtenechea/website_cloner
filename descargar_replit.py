@@ -7,12 +7,23 @@ import subprocess
 import time
 from datetime import datetime
 
+
+class SinAccesoError(Exception):
+    """Se lanza cuando el servidor redirige a otra página (lección sin acceso)."""
+
 # ── Configuración ──────────────────────────────────────────────────────────────
-BASE_DIR      = Path(r"C:\mis_sitios_descargados")
-COOKIES_FILE  = BASE_DIR / "cookies.txt"
-LINKS_FILE    = BASE_DIR / "links.txt"
-LOG_FILE      = BASE_DIR / "log.txt"
-FALLIDAS_FILE = BASE_DIR / "fallidas.txt"   # URLs que fallaron, listas para reintentar
+# Carpeta donde se guardan los cursos descargados.
+# Si se deja vacío (""), se usa la misma carpeta donde está este script.
+# DESTINO = r""
+DESTINO = r"D:\nacho\cursos_descargados"
+
+SCRIPT_DIR    = Path(__file__).parent                              # siempre la carpeta del script
+CURSOS_DIR    = Path(DESTINO) if DESTINO.strip() else SCRIPT_DIR  # donde van los cursos
+
+COOKIES_FILE  = SCRIPT_DIR / "cookies.txt"
+LINKS_FILE    = SCRIPT_DIR / "links.txt"
+LOG_FILE      = SCRIPT_DIR / "log.txt"
+FALLIDAS_FILE = SCRIPT_DIR / "fallidas.txt"
 DELAY         = 2
 MAX_INTENTOS_VIDEO = 3
 # Prefiere MP4 directo antes que HLS (evita problemas de fragmentos con Vimeo)
@@ -34,7 +45,8 @@ def log(msg: str = ""):
 
 def init_log():
     global _log_file
-    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+    CURSOS_DIR.mkdir(parents=True, exist_ok=True)
     _log_file = open(LOG_FILE, "a", encoding="utf-8")
     log(f"\n{'═'*60}")
     log(f"  Inicio: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -106,6 +118,39 @@ def cargar_cookies(path: Path) -> dict:
         log(f"  [advertencia] No se encontró wordpress_logged_in_* — puede que no estés autenticado")
 
     return cookies
+
+
+def verificar_login(session: requests.Session, url_prueba: str) -> bool:
+    """
+    Verifica la sesión yendo a la home del sitio y buscando la clase
+    'logged-in' en el <body> — WordPress la agrega siempre al estar autenticado,
+    sin importar si la página en sí es accesible o no.
+    """
+    parsed   = urlparse(url_prueba)
+    url_home = f"{parsed.scheme}://{parsed.netloc}/"
+    log(f"\n  [login] Verificando sesión en: {url_home}")
+    try:
+        r = session.get(url_home, timeout=30, allow_redirects=True)
+
+        # WordPress agrega 'logged-in' a las clases del <body> cuando hay sesión activa
+        m = re.search(r'<body[^>]+class="([^"]*)"', r.text)
+        if m and "logged-in" in m.group(1).split():
+            log(f"  [login] OK — sesión activa (body.logged-in detectado)")
+            return True
+
+        # Si hay form de login en la página, definitivamente no estamos logueados
+        if 'id="loginform"' in r.text or 'name="log"' in r.text:
+            log(f"  [login] FALLÓ — se encontró el formulario de login de WordPress")
+            return False
+
+        # No se pudo confirmar ni descartar — advertir pero no bloquear
+        log(f"  [advertencia login] No se detectó 'logged-in' en el body.")
+        log(f"  → Si las descargas dan páginas incorrectas, revisá las cookies.")
+        return True
+
+    except Exception as e:
+        log(f"  [login] Error al verificar: {e}")
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -210,18 +255,36 @@ def procesar_html_y_adjuntos(session: requests.Session, url: str, leccion_dir: P
     """
     Descarga el HTML, extrae adjuntos, reescribe rutas y guarda index.html.
     Devuelve (soup, html_raw) para reutilizar en la descarga de video.
+    Las carpetas se crean recién DESPUÉS de verificar que tenemos acceso.
     """
-    materiales = leccion_dir / "materiales"
-    materiales.mkdir(parents=True, exist_ok=True)
-
     log(f"  Descargando HTML...")
     try:
-        r = session.get(url, timeout=30)
+        r = session.get(url, timeout=30, allow_redirects=True)
         log(f"  [http {r.status_code}] {url}")
         r.raise_for_status()
     except Exception as e:
         log(f"  [error al obtener HTML] {e}")
         return None, ""
+
+    # Chequeo de acceso ANTES de crear carpetas
+    path_pedido    = urlparse(url).path.rstrip("/")
+    path_final     = urlparse(r.url).path.rstrip("/")
+    dominio_pedido = urlparse(url).netloc
+    dominio_final  = urlparse(r.url).netloc
+
+    if path_final != path_pedido:
+        if dominio_final != dominio_pedido:
+            log(f"  [sin acceso] Redirigido a otro dominio: {r.url}")
+            raise SinAccesoError(f"redirigido a otro dominio: {r.url}")
+        if path_pedido.startswith(path_final + "/") or path_final in ("/", ""):
+            log(f"  [sin acceso] Redirigido a página superior: {r.url}")
+            raise SinAccesoError(f"redirigido a página superior: {r.url}")
+        log(f"  [advertencia] URL redirigida a {r.url} — procesando igual")
+
+    # Acceso confirmado — recién ahora creamos las carpetas
+    materiales = leccion_dir / "materiales"
+    leccion_dir.mkdir(parents=True, exist_ok=True)
+    materiales.mkdir(parents=True, exist_ok=True)
 
     html_raw = r.text
     raw_path = leccion_dir / "index_raw.html"
@@ -334,10 +397,10 @@ def _correr_ytdlp(url_video: str, output_template: str, label: str) -> bool:
                     "--socket-timeout", "30",
                     "--no-part",
                 ],
-                capture_output=True,
+                stdout=None,              # progreso visible en consola en tiempo real
+                stderr=subprocess.PIPE,   # capturamos stderr solo para detectar errores
                 text=True,
             )
-            log(f"  [yt-dlp stdout]\n{result.stdout[-1500:]}")
             if result.returncode == 0:
                 log(f"  [video ok] {label}")
                 return True
@@ -362,7 +425,7 @@ def descargar_video(soup, html_raw: str, url_leccion: str, curso_slug: str, nomb
     2. Si no hay YouTube → yt-dlp sobre la URL de la lección (Vimeo, nativo, etc.).
     Devuelve lista de (archivo_local: Path, url_fuente: str).
     """
-    videos_dir = BASE_DIR / curso_slug / "videos"
+    videos_dir = CURSOS_DIR / curso_slug / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
     descargados = []
 
@@ -502,7 +565,7 @@ def _video_pendiente(leccion_dir: Path, curso_slug: str) -> bool:
         if "youtube.com" in src or "youtu.be" in src or "vimeo.com" in src:
             return True
 
-    videos_dir = BASE_DIR / curso_slug / "videos"
+    videos_dir = CURSOS_DIR / curso_slug / "videos"
     for tag in soup.find_all(["source", "video"]):
         src = tag.get("src") or ""
         if src.startswith("../videos/"):
@@ -521,7 +584,7 @@ def procesar_leccion(session: requests.Session, url: str) -> bool:
     False si ya estaba completamente descargada.
     """
     curso_slug, leccion_slug, nombre_video = segmentos_url(url)
-    leccion_dir = BASE_DIR / curso_slug / leccion_slug
+    leccion_dir = CURSOS_DIR / curso_slug / leccion_slug
 
     # ── Chequeo previo: ¿ya está descargada? ──────────────────────────────────
     if (leccion_dir / "index.html").exists():
@@ -547,8 +610,6 @@ def procesar_leccion(session: requests.Session, url: str) -> bool:
         videos_descargados = descargar_video(soup, html_raw, url, curso_slug, nombre_video)
         reescribir_videos_en_html(leccion_dir, videos_descargados)
         return True
-
-    leccion_dir.mkdir(parents=True, exist_ok=True)
 
     log(f"\n{'─'*60}")
     log(f"URL     : {url}")
@@ -598,14 +659,30 @@ def main():
         )
     })
 
+    if not verificar_login(session, urls[0]):
+        log(f"\n{'═'*60}")
+        log(f"  *** LOGIN FALLIDO ***")
+        log(f"  Las cookies no son válidas o la sesión expiró.")
+        log(f"  Exportá las cookies nuevamente desde el navegador y reemplazá cookies.txt.")
+        log(f"  No se descargó nada.")
+        log(f"{'═'*60}")
+        close_log()
+        return
+
     fallidas    = []  # (num, url, mensaje_error)
     ya_bajas    = []  # urls que ya estaban descargadas
+    sin_acceso  = []  # urls a las que el servidor no nos dejó entrar
 
     for i, url in enumerate(urls):
         try:
             procesada = procesar_leccion(session, url)
             if not procesada:
                 ya_bajas.append(url)
+        except SinAccesoError as e:
+            log(f"\n  [SIN ACCESO — lección {i+1}/{len(urls)}] {url}")
+            log(f"  → {e}")
+            log(f"  Continuando con la siguiente lección...")
+            sin_acceso.append((i + 1, url, str(e)))
         except Exception as e:
             msg = str(e)
             log(f"\n  [ERROR inesperado — lección {i+1}/{len(urls)}] {url}")
@@ -617,11 +694,17 @@ def main():
             time.sleep(DELAY)
 
     # ── Resumen final ──────────────────────────────────────────────────────────
-    nuevas = len(urls) - len(fallidas) - len(ya_bajas)
+    nuevas = len(urls) - len(fallidas) - len(ya_bajas) - len(sin_acceso)
     log(f"\n{'═'*60}")
     log(f"  Nuevas descargadas : {nuevas}/{len(urls)}")
     if ya_bajas:
         log(f"  Ya descargadas     : {len(ya_bajas)} (saltadas)")
+    if sin_acceso:
+        log(f"\n  ┌─ SIN ACCESO ({len(sin_acceso)} lección/es) ──────────────────────")
+        for num, u, err in sin_acceso:
+            log(f"  │  #{num}: {u}")
+            log(f"  │       → {err}")
+        log(f"  └─ No se crearon carpetas para estas lecciones.")
     if fallidas:
         log(f"  Con error          : {len(fallidas)}")
         for num, u, err in fallidas:
@@ -633,7 +716,8 @@ def main():
             FALLIDAS_FILE.unlink()
             log(f"  (fallidas.txt eliminado — todo OK)")
 
-    log(f"  Carpetas en: {BASE_DIR}")
+    log(f"  Programa en: {SCRIPT_DIR}")
+    log(f"  Cursos en  : {CURSOS_DIR}")
     close_log()
 
 
