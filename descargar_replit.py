@@ -12,8 +12,10 @@ BASE_DIR      = Path(r"C:\mis_sitios_descargados")
 COOKIES_FILE  = BASE_DIR / "cookies.txt"
 LINKS_FILE    = BASE_DIR / "links.txt"
 LOG_FILE      = BASE_DIR / "log.txt"
+FALLIDAS_FILE = BASE_DIR / "fallidas.txt"   # URLs que fallaron, listas para reintentar
 DELAY         = 2
-# Prefiere MP4 directo antes que HLS cuando esté disponible (evita problemas de fragmentos)
+MAX_INTENTOS_VIDEO = 3
+# Prefiere MP4 directo antes que HLS (evita problemas de fragmentos con Vimeo)
 VIDEO_CALIDAD = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best"
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -46,6 +48,38 @@ def close_log():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# REGISTRO DE FALLIDAS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def guardar_fallidas(fallidas: list):
+    """
+    Guarda en fallidas.txt las URLs que fallaron con su error.
+    El archivo se sobreescribe en cada corrida — siempre refleja el último run.
+    Si no hubo fallidas, borra el archivo (o no lo crea).
+    """
+    if not fallidas:
+        if FALLIDAS_FILE.exists():
+            FALLIDAS_FILE.unlink()
+        return
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lineas = [
+        f"# fallidas.txt — generado el {timestamp}",
+        f"# {len(fallidas)} URL(s) fallaron en el último run.",
+        f"# Para reintentar: copiá estas URLs a links.txt y volvé a correr descargar_replit.py",
+        "",
+    ]
+    for num, url, error in fallidas:
+        lineas.append(f"# Error en lección #{num}: {error}")
+        lineas.append(url)
+        lineas.append("")
+
+    FALLIDAS_FILE.write_text("\n".join(lineas), encoding="utf-8")
+    log(f"\n  [fallidas] Registro guardado en {FALLIDAS_FILE.name}")
+    log(f"  → Copiá esas URLs a links.txt para reintentar.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 1. COOKIES
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -65,7 +99,6 @@ def cargar_cookies(path: Path) -> dict:
 
     log(f"  [cookies] {len(cookies)} cookies cargadas desde {path.name}")
 
-    # Validar que hay cookie de sesión de WordPress
     wp_cookies = [k for k in cookies if k.startswith("wordpress_logged_in")]
     if wp_cookies:
         log(f"  [cookies] Sesión WP activa: {', '.join(wp_cookies)}")
@@ -115,15 +148,11 @@ YOUTUBE_PATTERNS = [
 
 def extraer_urls_youtube(soup: BeautifulSoup, html_raw: str) -> list[str]:
     """
-    Busca URLs de YouTube en:
-      - iframes (src y data-src)
-      - atributos data-* de cualquier elemento
-      - el texto crudo del HTML (para videos embebidos con JS)
+    Busca URLs de YouTube en iframes, atributos data-* y HTML crudo completo.
     Devuelve lista de URLs https://www.youtube.com/watch?v=VIDEO_ID sin duplicados.
     """
     ids_encontrados = []
 
-    # 1. Buscar en iframes
     for iframe in soup.find_all("iframe"):
         src = iframe.get("src") or iframe.get("data-src") or ""
         for pattern in YOUTUBE_PATTERNS:
@@ -131,7 +160,6 @@ def extraer_urls_youtube(soup: BeautifulSoup, html_raw: str) -> list[str]:
             if m:
                 ids_encontrados.append(m.group(1))
 
-    # 2. Buscar en atributos data-* de cualquier tag (LearnDash a veces los usa)
     for tag in soup.find_all(True):
         for attr, val in tag.attrs.items():
             if isinstance(val, str):
@@ -140,12 +168,10 @@ def extraer_urls_youtube(soup: BeautifulSoup, html_raw: str) -> list[str]:
                     if m:
                         ids_encontrados.append(m.group(1))
 
-    # 3. Buscar en el HTML crudo completo (cubre casos de JS/JSON embebido)
     for pattern in YOUTUBE_PATTERNS:
         for m in re.finditer(pattern, html_raw):
             ids_encontrados.append(m.group(1))
 
-    # Deduplicar manteniendo orden
     vistos = set()
     urls = []
     for vid_id in ids_encontrados:
@@ -182,9 +208,8 @@ def descargar_archivo(session: requests.Session, url: str, destino: Path) -> boo
 
 def procesar_html_y_adjuntos(session: requests.Session, url: str, leccion_dir: Path):
     """
-    Descarga el HTML de la lección, guarda index_raw.html, extrae adjuntos,
-    reescribe rutas y guarda index.html.
-    Devuelve el soup y el html crudo para que la función de video los reutilice.
+    Descarga el HTML, extrae adjuntos, reescribe rutas y guarda index.html.
+    Devuelve (soup, html_raw) para reutilizar en la descarga de video.
     """
     materiales = leccion_dir / "materiales"
     materiales.mkdir(parents=True, exist_ok=True)
@@ -230,17 +255,13 @@ def procesar_html_y_adjuntos(session: requests.Session, url: str, leccion_dir: P
             href = tag.get(atributo, "").strip()
             if not href or href.startswith(("javascript:", "mailto:", "#")):
                 continue
-
             href_abs = urljoin(url, href)
             sufijo   = Path(urlparse(href_abs).path).suffix.lower()
-
             if sufijo not in extensiones_descargables:
                 continue
-
             encontrados += 1
             nombre_archivo = Path(urlparse(href_abs).path).name
             destino = materiales / nombre_archivo
-
             if descargar_archivo(session, href_abs, destino):
                 tag[atributo] = f"materiales/{nombre_archivo}"
 
@@ -257,14 +278,13 @@ def procesar_html_y_adjuntos(session: requests.Session, url: str, leccion_dir: P
 # 5. DESCARGA DE VIDEO
 # ══════════════════════════════════════════════════════════════════════════════
 
-MAX_INTENTOS_VIDEO = 3  # cuántas veces reintentar la descarga si falla
+def _correr_ytdlp(url_video: str, output_template: str, label: str) -> bool:
+    """
+    Corre yt-dlp sobre una URL. Reintenta hasta MAX_INTENTOS_VIDEO veces
+    desde cero si falla por error de red, para que el video quede completo.
+    """
+    import glob as _glob
 
-def _correr_ytdlp(url_video: str, output_template: str, label: str):
-    """
-    Corre yt-dlp sobre una URL concreta.
-    Si falla por error de red (fragmentos HLS, timeout, etc.), reintenta
-    hasta MAX_INTENTOS_VIDEO veces desde cero — así el video queda completo.
-    """
     for intento in range(1, MAX_INTENTOS_VIDEO + 1):
         if intento > 1:
             log(f"  [video] reintentando ({intento}/{MAX_INTENTOS_VIDEO}) → {label}")
@@ -272,8 +292,6 @@ def _correr_ytdlp(url_video: str, output_template: str, label: str):
         else:
             log(f"  [video] descargando {label} → {url_video}")
 
-        # Borrar archivo parcial antes de reintentar para empezar limpio
-        import glob as _glob
         for parcial in _glob.glob(output_template.replace("%(ext)s", "*") + ".part"):
             try:
                 Path(parcial).unlink()
@@ -292,7 +310,7 @@ def _correr_ytdlp(url_video: str, output_template: str, label: str):
                     "--fragment-retries", "5",
                     "--retries", "5",
                     "--socket-timeout", "30",
-                    "--no-part",  # no dejar archivos .part incompletos
+                    "--no-part",
                 ],
                 capture_output=True,
                 text=True,
@@ -304,7 +322,6 @@ def _correr_ytdlp(url_video: str, output_template: str, label: str):
             else:
                 log(f"  [error video] código {result.returncode} — intento {intento}/{MAX_INTENTOS_VIDEO}")
                 log(f"  [yt-dlp stderr]\n{result.stderr[-800:]}")
-                # Si el error no es de red, no tiene sentido reintentar
                 if "Unsupported URL" in result.stderr or "not found" in result.stderr.lower():
                     break
         except FileNotFoundError:
@@ -319,52 +336,40 @@ def _correr_ytdlp(url_video: str, output_template: str, label: str):
 
 def descargar_video(soup, html_raw: str, url_leccion: str, curso_slug: str, nombre_video: str) -> list:
     """
-    Estrategia:
-      1. Busca URLs de YouTube en el HTML (iframe, data-*, texto crudo).
-      2. Si encuentra alguna, descarga cada una con yt-dlp.
-      3. Si no hay YouTube, intenta yt-dlp sobre la URL de la lección directamente
-         (para videos nativos de LearnDash / Vimeo / etc.).
-    Devuelve lista de (archivo_local: Path, url_fuente: str) para los videos descargados.
+    1. Busca YouTube en el HTML → descarga por video ID.
+    2. Si no hay YouTube → yt-dlp sobre la URL de la lección (Vimeo, nativo, etc.).
+    Devuelve lista de (archivo_local: Path, url_fuente: str).
     """
     videos_dir = BASE_DIR / curso_slug / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
-    descargados = []  # [(Path, str_url_fuente)]
+    descargados = []
 
-    # ── Buscar videos de YouTube ──────────────────────────────────────────────
-    if soup is not None:
-        yt_urls = extraer_urls_youtube(soup, html_raw)
-    else:
-        yt_urls = []
+    yt_urls = extraer_urls_youtube(soup, html_raw) if soup is not None else []
 
     if yt_urls:
         log(f"  [youtube] {len(yt_urls)} video(s) encontrado(s) en el HTML")
         for idx, yt_url in enumerate(yt_urls):
             sufijo    = f"_yt{idx+1}" if len(yt_urls) > 1 else ""
             plantilla = str(videos_dir / f"{nombre_video}{sufijo}.%(ext)s")
-
             existentes = list(videos_dir.glob(f"{nombre_video}{sufijo}.*"))
             if existentes:
                 log(f"  [video ya existe] {existentes[0].name}")
                 descargados.append((existentes[0], yt_url))
                 continue
-
-            ok = _correr_ytdlp(yt_url, plantilla, f"YouTube #{idx+1}")
-            if ok:
+            if _correr_ytdlp(yt_url, plantilla, f"YouTube #{idx+1}"):
                 encontrados = list(videos_dir.glob(f"{nombre_video}{sufijo}.*"))
                 if encontrados:
                     descargados.append((encontrados[0], yt_url))
         return descargados
 
-    # ── Sin YouTube: intentar con la URL de la lección (video nativo / Vimeo) ─
-    log(f"  [video] No se encontraron iframes de YouTube — intentando URL de lección directamente")
+    log(f"  [video] Sin YouTube — intentando URL de lección directamente")
     existentes = list(videos_dir.glob(f"{nombre_video}.*"))
     if existentes:
         log(f"  [video ya existe] {existentes[0].name}")
         return [(existentes[0], url_leccion)]
 
     plantilla = str(videos_dir / f"{nombre_video}.%(ext)s")
-    ok = _correr_ytdlp(url_leccion, plantilla, "lección completa")
-    if ok:
+    if _correr_ytdlp(url_leccion, plantilla, "lección completa"):
         encontrados = list(videos_dir.glob(f"{nombre_video}.*"))
         if encontrados:
             descargados.append((encontrados[0], url_leccion))
@@ -377,11 +382,8 @@ def descargar_video(soup, html_raw: str, url_leccion: str, curso_slug: str, nomb
 
 def _ext_mime(ext: str) -> str:
     return {
-        ".mp4": "video/mp4",
-        ".webm": "video/webm",
-        ".mkv": "video/x-matroska",
-        ".mov": "video/quicktime",
-        ".m4v": "video/mp4",
+        ".mp4": "video/mp4", ".webm": "video/webm",
+        ".mkv": "video/x-matroska", ".mov": "video/quicktime", ".m4v": "video/mp4",
     }.get(ext.lower(), "video/mp4")
 
 
@@ -397,12 +399,10 @@ def _video_tag(ruta_relativa: str, ext: str) -> str:
 
 def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
     """
-    Lee index.html, reemplaza cada iframe de YouTube/Vimeo (y tags <video>/<source>
-    con URLs remotas) por un <video> local apuntando a ../videos/nombre.ext
+    Reemplaza iframes de YouTube/Vimeo y tags <video> remotos por <video> locales.
     """
     if not videos_descargados:
         return
-
     html_path = leccion_dir / "index.html"
     if not html_path.exists():
         return
@@ -411,17 +411,15 @@ def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
     modificado = False
 
     for archivo_local, url_fuente in videos_descargados:
-        # Ruta relativa desde {leccion}/index.html → ../videos/archivo.ext
         ruta_rel = f"../videos/{archivo_local.name}"
         ext      = archivo_local.suffix
 
-        # ── 1. Iframes de YouTube: buscar por video ID ────────────────────────
+        # YouTube: buscar por video ID
         m_yt = None
         for pat in YOUTUBE_PATTERNS:
             m_yt = re.search(pat, url_fuente)
             if m_yt:
                 break
-
         if m_yt:
             vid_id = m_yt.group(1)
             for iframe in soup.find_all("iframe"):
@@ -432,7 +430,7 @@ def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
                     modificado = True
             continue
 
-        # ── 2. Iframes de Vimeo ───────────────────────────────────────────────
+        # Vimeo
         for iframe in soup.find_all("iframe"):
             src = iframe.get("src") or iframe.get("data-src") or ""
             if "vimeo.com" in src:
@@ -441,7 +439,7 @@ def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
                 modificado = True
                 break
 
-        # ── 3. Tags <video> o <source> con URLs remotas ───────────────────────
+        # Tags <video>/<source> con URLs remotas
         for tag in soup.find_all(["video", "source"]):
             src = tag.get("src") or ""
             if src.startswith("http"):
@@ -453,7 +451,7 @@ def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
         html_path.write_text(soup.prettify(), encoding="utf-8")
         log(f"  [html] index.html actualizado con videos locales")
     else:
-        log(f"  [html] No se encontraron iframes de video para reemplazar en el HTML")
+        log(f"  [html] No se encontraron iframes de video para reemplazar")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -462,7 +460,6 @@ def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
 
 def procesar_leccion(session: requests.Session, url: str):
     curso_slug, leccion_slug, nombre_video = segmentos_url(url)
-
     leccion_dir = BASE_DIR / curso_slug / leccion_slug
     leccion_dir.mkdir(parents=True, exist_ok=True)
 
@@ -478,7 +475,7 @@ def procesar_leccion(session: requests.Session, url: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. MAIN
+# 8. MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -503,7 +500,6 @@ def main():
     log(f"Lecciones a procesar: {len(urls)}")
 
     cookies = cargar_cookies(COOKIES_FILE)
-
     session = requests.Session()
     session.cookies.update(cookies)
     session.headers.update({
@@ -514,13 +510,38 @@ def main():
         )
     })
 
+    fallidas = []  # lista de (num, url, mensaje_error)
+
     for i, url in enumerate(urls):
-        procesar_leccion(session, url)
+        try:
+            procesar_leccion(session, url)
+        except Exception as e:
+            msg = str(e)
+            log(f"\n  [ERROR inesperado — lección {i+1}/{len(urls)}] {url}")
+            log(f"  → {msg}")
+            fallidas.append((i + 1, url, msg))
+            log(f"  Continuando con la siguiente lección...")
+
         if i < len(urls) - 1:
             time.sleep(DELAY)
 
+    # ── Resumen final ──────────────────────────────────────────────────────────
     log(f"\n{'═'*60}")
-    log(f"¡Listo! Carpetas en: {BASE_DIR}")
+    log(f"  Procesadas : {len(urls) - len(fallidas)}/{len(urls)} lecciones OK")
+
+    if fallidas:
+        log(f"  Fallidas   : {len(fallidas)}")
+        for num, u, err in fallidas:
+            log(f"    #{num}: {u}")
+            log(f"         {err}")
+        guardar_fallidas(fallidas)
+    else:
+        # Sin errores: limpiar archivo de fallidas si existe de un run anterior
+        if FALLIDAS_FILE.exists():
+            FALLIDAS_FILE.unlink()
+            log(f"  (fallidas.txt eliminado — todo OK)")
+
+    log(f"  Carpetas en: {BASE_DIR}")
     close_log()
 
 

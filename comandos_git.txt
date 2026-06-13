@@ -1,0 +1,46 @@
+══════════════════════════════════════════════════════
+  COMANDOS GIT — mis_sitios_descargados
+══════════════════════════════════════════════════════
+
+1. Ver estado actual
+─────────────────────
+git status
+
+
+2. Agregar archivos al staging
+────────────────────────────────
+git add descargar_replit.py
+git add indice.py
+git add -u
+(el -u agrega los archivos borrados que git ya rastreaba)
+
+
+3. Verificar qué va a entrar en el commit
+───────────────────────────────────────────
+git status
+
+
+4. Hacer el commit
+────────────────────
+git commit -m "Fix YouTube/Vimeo: videos locales en HTML, reintentos, registro de fallidas"
+
+
+5. Subir al repositorio
+─────────────────────────
+git push
+
+
+══════════════════════════════════════════════════════
+  NOTAS
+══════════════════════════════════════════════════════
+
+- cookies.txt y log.txt están en .gitignore → NO se suben
+- Las carpetas de cursos (borrar/, cc1-e-contrapunto..., etc.)
+  también están ignoradas por el */ en .gitignore
+- fallidas.txt se genera solo cuando hay errores → también
+  conviene agregarlo al .gitignore:
+
+    echo fallidas.txt >> .gitignore
+    git add .gitignore
+
+══════════════════════════════════════════════════════
