@@ -578,13 +578,39 @@ def _video_pendiente(leccion_dir: Path, curso_slug: str) -> bool:
     return False
 
 
+def resolver_leccion_dir(curso_slug: str, leccion_slug: str) -> Path:
+    """
+    Devuelve la Path real de la carpeta de la leccion, tolerando prefijos numericos.
+    Para cada carpeta en curso_dir, quita el prefijo "NNN_" si existe y compara
+    el resultado exactamente con leccion_slug. Asi "001_ejercicio" matchea "ejercicio"
+    pero "021_primer-ejercicio" no matchea "ejercicio".
+    Si no encuentra ninguna, devuelve la ruta sin prefijo (se creara al descargar).
+    """
+    import re as _re
+    curso_dir   = CURSOS_DIR / curso_slug
+    ruta_exacta = curso_dir / leccion_slug
+    if ruta_exacta.exists():
+        return ruta_exacta
+
+    if curso_dir.exists():
+        for carpeta in curso_dir.iterdir():
+            if not carpeta.is_dir():
+                continue
+            # Quitarle el prefijo numerico si lo tiene y comparar exactamente
+            nombre_sin_prefijo = _re.sub(r"^\d{2,}_", "", carpeta.name)
+            if nombre_sin_prefijo == leccion_slug:
+                return carpeta
+
+    return ruta_exacta
+
+
 def procesar_leccion(session: requests.Session, url: str) -> bool:
     """
     Devuelve True si la lección fue procesada (nueva o video completado),
     False si ya estaba completamente descargada.
     """
     curso_slug, leccion_slug, nombre_video = segmentos_url(url)
-    leccion_dir = CURSOS_DIR / curso_slug / leccion_slug
+    leccion_dir = resolver_leccion_dir(curso_slug, leccion_slug)
 
     # ── Chequeo previo: ¿ya está descargada? ──────────────────────────────────
     if (leccion_dir / "index.html").exists():
