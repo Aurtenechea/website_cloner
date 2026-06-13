@@ -13,7 +13,8 @@ git add descargar_replit.py
 git add indice.py
 git add -u
 (el -u agrega los archivos borrados que git ya rastreaba)
-
+git add -A 
+(todos)
 
 3. Verificar qué va a entrar en el commit
 ───────────────────────────────────────────
