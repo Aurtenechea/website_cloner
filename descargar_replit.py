@@ -278,13 +278,39 @@ def procesar_html_y_adjuntos(session: requests.Session, url: str, leccion_dir: P
 # 5. DESCARGA DE VIDEO
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _es_parcial_ytdlp(path: Path) -> bool:
+    """
+    Devuelve True si el archivo es un fragmento temporal de yt-dlp.
+    Detecta cualquier nombre que termine en .fNNN o .fNNN.ext:
+      nombre.f398          → stream sin mergear
+      nombre.f398.mp4      → merge incompleto que quedó con el código en el nombre
+      nombre.part          → descarga interrumpida
+    """
+    return (
+        bool(re.search(r'\.f\d+(\.[^.]+)?$', path.name))
+        or path.suffix == ".part"
+    )
+
+
+def _limpiar_parciales(output_template: str):
+    """Borra archivos .part y .fNNN que haya dejado una descarga interrumpida."""
+    import glob as _glob
+    patron = output_template.replace("%(ext)s", "*")
+    for ruta in _glob.glob(patron) + _glob.glob(patron + ".part"):
+        p = Path(ruta)
+        if _es_parcial_ytdlp(p):
+            try:
+                p.unlink()
+                log(f"  [limpieza] borrado parcial: {p.name}")
+            except Exception:
+                pass
+
+
 def _correr_ytdlp(url_video: str, output_template: str, label: str) -> bool:
     """
     Corre yt-dlp sobre una URL. Reintenta hasta MAX_INTENTOS_VIDEO veces
     desde cero si falla por error de red, para que el video quede completo.
     """
-    import glob as _glob
-
     for intento in range(1, MAX_INTENTOS_VIDEO + 1):
         if intento > 1:
             log(f"  [video] reintentando ({intento}/{MAX_INTENTOS_VIDEO}) → {label}")
@@ -292,11 +318,7 @@ def _correr_ytdlp(url_video: str, output_template: str, label: str) -> bool:
         else:
             log(f"  [video] descargando {label} → {url_video}")
 
-        for parcial in _glob.glob(output_template.replace("%(ext)s", "*") + ".part"):
-            try:
-                Path(parcial).unlink()
-            except Exception:
-                pass
+        _limpiar_parciales(output_template)
 
         try:
             result = subprocess.run(
@@ -351,26 +373,31 @@ def descargar_video(soup, html_raw: str, url_leccion: str, curso_slug: str, nomb
         for idx, yt_url in enumerate(yt_urls):
             sufijo    = f"_yt{idx+1}" if len(yt_urls) > 1 else ""
             plantilla = str(videos_dir / f"{nombre_video}{sufijo}.%(ext)s")
-            existentes = list(videos_dir.glob(f"{nombre_video}{sufijo}.*"))
+            existentes = [p for p in videos_dir.glob(f"{nombre_video}{sufijo}.*")
+                          if not _es_parcial_ytdlp(p)]
             if existentes:
                 log(f"  [video ya existe] {existentes[0].name}")
                 descargados.append((existentes[0], yt_url))
                 continue
+            _limpiar_parciales(plantilla)
             if _correr_ytdlp(yt_url, plantilla, f"YouTube #{idx+1}"):
-                encontrados = list(videos_dir.glob(f"{nombre_video}{sufijo}.*"))
+                encontrados = [p for p in videos_dir.glob(f"{nombre_video}{sufijo}.*")
+                               if not _es_parcial_ytdlp(p)]
                 if encontrados:
                     descargados.append((encontrados[0], yt_url))
         return descargados
 
     log(f"  [video] Sin YouTube — intentando URL de lección directamente")
-    existentes = list(videos_dir.glob(f"{nombre_video}.*"))
+    existentes = [p for p in videos_dir.glob(f"{nombre_video}.*")
+                  if not _es_parcial_ytdlp(p)]
     if existentes:
         log(f"  [video ya existe] {existentes[0].name}")
         return [(existentes[0], url_leccion)]
 
     plantilla = str(videos_dir / f"{nombre_video}.%(ext)s")
     if _correr_ytdlp(url_leccion, plantilla, "lección completa"):
-        encontrados = list(videos_dir.glob(f"{nombre_video}.*"))
+        encontrados = [p for p in videos_dir.glob(f"{nombre_video}.*")
+                       if not _es_parcial_ytdlp(p)]
         if encontrados:
             descargados.append((encontrados[0], url_leccion))
     return descargados
@@ -458,9 +485,69 @@ def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
 # 7. PROCESAMIENTO DE UNA LECCIÓN
 # ══════════════════════════════════════════════════════════════════════════════
 
-def procesar_leccion(session: requests.Session, url: str):
+def _video_pendiente(leccion_dir: Path, curso_slug: str) -> bool:
+    """
+    Devuelve True si index.html existe pero hay videos sin descargar:
+    - iframes de YouTube/Vimeo que no fueron reemplazados, o
+    - <source>/<video> con src="../videos/FILENAME" cuyo archivo no existe en disco.
+    """
+    html_path = leccion_dir / "index.html"
+    if not html_path.exists():
+        return False
+
+    soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+
+    for iframe in soup.find_all("iframe"):
+        src = iframe.get("src") or iframe.get("data-src") or ""
+        if "youtube.com" in src or "youtu.be" in src or "vimeo.com" in src:
+            return True
+
+    videos_dir = BASE_DIR / curso_slug / "videos"
+    for tag in soup.find_all(["source", "video"]):
+        src = tag.get("src") or ""
+        if src.startswith("../videos/"):
+            nombre_archivo = src[len("../videos/"):]
+            archivo = videos_dir / nombre_archivo
+            # Pendiente si el archivo no existe O es un fragmento temporal (.fNNN)
+            if not archivo.exists() or _es_parcial_ytdlp(archivo):
+                return True
+
+    return False
+
+
+def procesar_leccion(session: requests.Session, url: str) -> bool:
+    """
+    Devuelve True si la lección fue procesada (nueva o video completado),
+    False si ya estaba completamente descargada.
+    """
     curso_slug, leccion_slug, nombre_video = segmentos_url(url)
     leccion_dir = BASE_DIR / curso_slug / leccion_slug
+
+    # ── Chequeo previo: ¿ya está descargada? ──────────────────────────────────
+    if (leccion_dir / "index.html").exists():
+        if not _video_pendiente(leccion_dir, curso_slug):
+            log(f"\n{'─'*60}")
+            log(f"[ya descargada] {leccion_slug}  ({url})")
+            log(f"  → Saltando. Borrá la carpeta si querés volver a descargarla:")
+            log(f"     {leccion_dir}")
+            return False
+
+        # HTML existe pero falta el video — completar solo la descarga de video
+        log(f"\n{'─'*60}")
+        log(f"[completando video] {leccion_slug}  ({url})")
+        log(f"  → index.html existe pero el video no está. Descargando...")
+        raw_path = leccion_dir / "index_raw.html"
+        if raw_path.exists():
+            html_raw = raw_path.read_text(encoding="utf-8")
+            soup = BeautifulSoup(html_raw, "html.parser")
+            log(f"  → Usando index_raw.html guardado (sin re-descargar el HTML)")
+        else:
+            log(f"  → index_raw.html no encontrado, re-descargando el HTML...")
+            soup, html_raw = procesar_html_y_adjuntos(session, url, leccion_dir)
+        videos_descargados = descargar_video(soup, html_raw, url, curso_slug, nombre_video)
+        reescribir_videos_en_html(leccion_dir, videos_descargados)
+        return True
+
     leccion_dir.mkdir(parents=True, exist_ok=True)
 
     log(f"\n{'─'*60}")
@@ -472,6 +559,7 @@ def procesar_leccion(session: requests.Session, url: str):
     soup, html_raw = procesar_html_y_adjuntos(session, url, leccion_dir)
     videos_descargados = descargar_video(soup, html_raw, url, curso_slug, nombre_video)
     reescribir_videos_en_html(leccion_dir, videos_descargados)
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -510,11 +598,14 @@ def main():
         )
     })
 
-    fallidas = []  # lista de (num, url, mensaje_error)
+    fallidas    = []  # (num, url, mensaje_error)
+    ya_bajas    = []  # urls que ya estaban descargadas
 
     for i, url in enumerate(urls):
         try:
-            procesar_leccion(session, url)
+            procesada = procesar_leccion(session, url)
+            if not procesada:
+                ya_bajas.append(url)
         except Exception as e:
             msg = str(e)
             log(f"\n  [ERROR inesperado — lección {i+1}/{len(urls)}] {url}")
@@ -526,17 +617,18 @@ def main():
             time.sleep(DELAY)
 
     # ── Resumen final ──────────────────────────────────────────────────────────
+    nuevas = len(urls) - len(fallidas) - len(ya_bajas)
     log(f"\n{'═'*60}")
-    log(f"  Procesadas : {len(urls) - len(fallidas)}/{len(urls)} lecciones OK")
-
+    log(f"  Nuevas descargadas : {nuevas}/{len(urls)}")
+    if ya_bajas:
+        log(f"  Ya descargadas     : {len(ya_bajas)} (saltadas)")
     if fallidas:
-        log(f"  Fallidas   : {len(fallidas)}")
+        log(f"  Con error          : {len(fallidas)}")
         for num, u, err in fallidas:
             log(f"    #{num}: {u}")
             log(f"         {err}")
         guardar_fallidas(fallidas)
     else:
-        # Sin errores: limpiar archivo de fallidas si existe de un run anterior
         if FALLIDAS_FILE.exists():
             FALLIDAS_FILE.unlink()
             log(f"  (fallidas.txt eliminado — todo OK)")

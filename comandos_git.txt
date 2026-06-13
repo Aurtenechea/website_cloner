@@ -20,6 +20,10 @@ git add -u
 git status
 
 
+ver diferencias 
+git diff
+
+
 4. Hacer el commit
 ────────────────────
 git commit -m "Fix YouTube/Vimeo: videos locales en HTML, reintentos, registro de fallidas"
