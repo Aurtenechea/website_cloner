@@ -1,3 +1,7 @@
+import sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import requests
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -8,10 +12,10 @@ import re
 # ── Configuración ──────────────────────────────────────────────────────────────
 BASE_DIR     = Path(r"C:\mis_sitios_descargados")
 COOKIES_FILE = BASE_DIR / "cookies.txt"
-LINKS_FILE   = BASE_DIR / "links_autocreado.txt"
+# LINKS_FILE se genera dinámicamente desde la URL del curso en main()
 
 # Pegá acá la URL de la página de índice del curso
-URL_INDICE = "https://cresciente.net/cursos/cc1-e-contrapunto-por-especies/"
+URL_INDICE = "https://cresciente.net/cursos/ciclo-0-primeros-pasos-en-la-composicion-musical-v3-0"
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -154,13 +158,23 @@ def pedir_pagina_ajax(
     return BeautifulSoup(html_fragment, "html.parser")
 
 
-def extraer_links_de_soup(soup: BeautifulSoup, url_indice: str, dominio_base: str, curso_slug: str, vistas: set) -> list:
+def extraer_links_de_soup(soup: BeautifulSoup, url_indice: str, dominio_base: str, curso_slug: str, vistas: set, debug: bool = False) -> list:
     encontrados = []
+    descartados = []
     for a in soup.find_all("a", href=True):
         href = urljoin(url_indice, a["href"].strip())
-        if href not in vistas and es_url_leccion(href, dominio_base, curso_slug):
+        if href in vistas:
+            continue
+        if es_url_leccion(href, dominio_base, curso_slug):
             encontrados.append(href)
             vistas.add(href)
+        else:
+            if debug and dominio_base in href:
+                descartados.append(href)
+    if debug and descartados:
+        print(f"  [debug] Links del dominio descartados ({len(descartados)}):")
+        for u in descartados:
+            print(f"    DESCARTADO: {u}")
     return encontrados
 
 
@@ -289,6 +303,20 @@ def extraer_links_lecciones(url_indice: str) -> list[str]:
                 total_items = int(m.group(1))
                 break
 
+    # Estrategia extra: buscar links de paginación en el HTML
+    # LearnDash a veces pone hrefs como ?ld-courseinfo-lesson-page=3
+    # El número más alto encontrado es el total de páginas
+    if total_paginas == 1:
+        paginas_en_links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            m = re.search(r'ld-courseinfo-lesson-page=(\d+)', href)
+            if m:
+                paginas_en_links.append(int(m.group(1)))
+        if paginas_en_links:
+            total_paginas = max(paginas_en_links)
+            print(f"  [total_pages] Detectado desde links de paginación en HTML: {total_paginas}")
+
     # Si num_por_pagina es 60 pero hay 122 items y 1 página detectada,
     # calculamos total_paginas a partir de items (mejor que quedarse en 1)
     if total_paginas == 1 and total_items > num_por_pagina:
@@ -299,62 +327,44 @@ def extraer_links_lecciones(url_indice: str) -> list[str]:
     print(f"  [paginador] course_id={course_id} | user_id={user_id} | nonce={nonce or '(no encontrado)'}")
     print(f"  [paginador] total_páginas={total_paginas} | items={total_items} | por_página={num_por_pagina}")
 
-    # ── Recolectar links de todas las páginas ─────────────────────────────────
+    # ── Extraer links desde el sidebar de la primera lección ────────────────
+    # El sidebar (div.lms-lessions-list) tiene el índice completo del curso
+    # sin paginación — mucho más confiable que el AJAX del índice.
     lecciones_encontradas = []
     vistas = set()
 
-    # Página 1: ya la tenemos en el HTML inicial
-    print(f"\n  [página 1] Extrayendo del HTML inicial...")
-    links_p1 = extraer_links_de_soup(soup, url_indice, dominio_base, curso_slug, vistas)
-    lecciones_encontradas.extend(links_p1)
-    print(f"  → {len(links_p1)} lecciones en página 1")
+    # Primero obtenemos la primera lección desde el HTML del índice
+    primera_leccion = None
+    for a in soup.find_all("a", href=True):
+        href = urljoin(url_indice, a["href"].strip())
+        if es_url_leccion(href, dominio_base, curso_slug):
+            primera_leccion = href
+            break
 
-    # Páginas 2 en adelante: via AJAX
-    # Modo A: si sabemos cuántas páginas hay, las pedimos todas
-    # Modo B (fallback): iteramos hasta que una página devuelva 0 lecciones
-    MAX_PAGINAS_FALLBACK = 20  # techo de seguridad para el modo fallback
-
-    if not nonce:
-        print(f"\n  [error] No se encontró pager_nonce — no se pueden pedir páginas adicionales.")
-        print(f"  → Revisá que estés autenticado y que las cookies sean válidas.")
+    if not primera_leccion:
+        print(f"  [error] No se encontró ninguna lección en el índice para acceder al sidebar")
     else:
-        pagina = 2
-        paginas_sin_resultado = 0
-
-        while True:
-            # Condición de corte en modo A (total_pages conocido)
-            if total_paginas > 1 and pagina > total_paginas:
-                break
-            # Condición de corte en modo B (fallback sin total_pages)
-            if total_paginas == 1 and pagina > MAX_PAGINAS_FALLBACK:
-                print(f"  [fallback] Llegamos al límite de {MAX_PAGINAS_FALLBACK} páginas — deteniendo.")
-                break
-            if paginas_sin_resultado >= 2:
-                print(f"  [fallback] Dos páginas consecutivas sin lecciones — fin de la paginación.")
-                break
-
-            soup_pag = pedir_pagina_ajax(
-                session, ajax_url, course_id, user_id, nonce,
-                pagina, num_por_pagina, total_paginas, total_items
-            )
-            if soup_pag is None:
-                print(f"  [error] No se pudo obtener página {pagina} — se omite")
-                paginas_sin_resultado += 1
-                pagina += 1
-                continue
-
-            links = extraer_links_de_soup(soup_pag, url_indice, dominio_base, curso_slug, vistas)
-            lecciones_encontradas.extend(links)
-            print(f"  → {len(links)} lecciones en página {pagina}")
-
-            if len(links) == 0:
-                paginas_sin_resultado += 1
+        print(f"\n  [sidebar] Entrando a primera lección: {primera_leccion}")
+        try:
+            r2 = session.get(primera_leccion, timeout=30)
+            print(f"  [http {r2.status_code}]")
+            soup2 = BeautifulSoup(r2.text, "html.parser")
+            sidebar = soup2.find(class_="lms-lessions-list") or soup2.find(class_="bb-lessons-list")
+            if sidebar:
+                for a in sidebar.find_all("a", href=True):
+                    href = urljoin(url_indice, a["href"].strip()).split("?")[0].split("#")[0]
+                    if not href.endswith("/"):
+                        href += "/"
+                    if href not in vistas and es_url_leccion(href, dominio_base, curso_slug):
+                        lecciones_encontradas.append(href)
+                        vistas.add(href)
+                print(f"  [sidebar] {len(lecciones_encontradas)} lecciones encontradas")
             else:
-                paginas_sin_resultado = 0
+                print(f"  [sidebar] No se encontró div.lms-lessions-list — intentando fallback en HTML del índice")
+        except Exception as e:
+            print(f"  [sidebar] Error: {e}")
 
-            pagina += 1
-
-    # ── Fallback: si no encontró nada, buscar en todo el HTML ────────────────
+    # ── Fallback: si no encontró nada, buscar en todo el HTML del índice ─────
     if not lecciones_encontradas:
         print(f"\n  [fallback] Buscando en todos los <a> del HTML inicial...")
         for a in soup.find_all("a", href=True):
@@ -412,6 +422,21 @@ def main():
     if "NOMBRE-DEL-CURSO" in URL_INDICE:
         print("⚠  Editá la variable URL_INDICE en el script con la URL real del curso.")
         return
+
+    # Derivar nombre del archivo desde el slug del curso en la URL
+    from urllib.parse import urlparse
+    partes = urlparse(URL_INDICE).path.strip("/").split("/")
+    curso_slug_archivo = ""
+    for i, p in enumerate(partes):
+        if p in ("courses", "cursos", "curso") and i + 1 < len(partes):
+            curso_slug_archivo = partes[i + 1]
+            break
+    if not curso_slug_archivo and partes:
+        curso_slug_archivo = partes[-1]
+    nombre_archivo = "links_curso_" + curso_slug_archivo.replace("-", "_") + ".txt"
+    global LINKS_FILE
+    LINKS_FILE = BASE_DIR / nombre_archivo
+    print(f"  [links] Archivo de salida: {nombre_archivo}")
 
     urls = extraer_links_lecciones(URL_INDICE)
     guardar_en_links_txt(urls)
