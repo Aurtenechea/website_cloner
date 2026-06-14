@@ -520,22 +520,57 @@ def reescribir_videos_en_html(leccion_dir: Path, videos_descargados: list):
                     modificado = True
             continue
 
-        # Vimeo
+        # Vimeo / Bunny.net (mediadelivery.net) y cualquier otro iframe de video conocido
+        IFRAME_VIDEO_DOMINIOS = (
+            "vimeo.com",
+            "mediadelivery.net", "iframe.mediadelivery.net", "bunnycdn.com",  # Bunny.net
+            "wistia.com", "fast.wistia.net",          # Wistia
+            "loom.com",                                # Loom
+            "kaltura.com",                             # Kaltura
+            "sproutvideo.com",                         # SproutVideo
+            "vidyard.com",                             # Vidyard
+            "dailymotion.com",                         # Dailymotion
+            "jwplatform.com", "jwplayer.com",          # JW Player
+            "brightcove.net", "brightcove.com",        # Brightcove
+            "api.video",                               # api.video
+        )
         for iframe in soup.find_all("iframe"):
             src = iframe.get("src") or iframe.get("data-src") or ""
-            if "vimeo.com" in src:
+            if any(d in src for d in IFRAME_VIDEO_DOMINIOS):
                 iframe.replace_with(BeautifulSoup(_video_tag(ruta_rel, ext), "html.parser"))
-                log(f"  [html] iframe Vimeo reemplazado → {ruta_rel}")
+                log(f"  [html] iframe de video reemplazado ({src[:60]}...) → {ruta_rel}")
                 modificado = True
                 break
 
-        # Tags <video>/<source> con URLs remotas
-        for tag in soup.find_all(["video", "source"]):
-            src = tag.get("src") or ""
-            if src.startswith("http"):
-                tag["src"] = ruta_rel
-                log(f"  [html] <{tag.name}> src reemplazado → {ruta_rel}")
+        # Tags <video>/<source> con URLs remotas (incluyendo Bunny.net/HLS)
+        DOMINIOS_REMOTOS = ("b-cdn.net", "mediadelivery.net", "vz-", "vimeo.com", "youtube.com")
+        for video_tag in soup.find_all("video"):
+            # Considerar remoto si: src empieza con http, es blob:, o algún <source> hijo es remoto/HLS
+            src_video = video_tag.get("src") or ""
+            sources   = video_tag.find_all("source")
+            es_remoto = (
+                src_video.startswith("http") or
+                src_video.startswith("blob:") or
+                any(
+                    (s.get("src") or "").startswith("http") or
+                    any(d in (s.get("src") or "") for d in DOMINIOS_REMOTOS) or
+                    (s.get("type") or "") == "application/vnd.apple.mpegURL"
+                    for s in sources
+                )
+            )
+            if es_remoto:
+                video_tag.replace_with(BeautifulSoup(_video_tag(ruta_rel, ext), "html.parser"))
+                log(f"  [html] <video> remoto (posiblemente HLS/Bunny) reemplazado → {ruta_rel}")
                 modificado = True
+                break
+        else:
+            # Fallback: source sueltos fuera de <video>
+            for tag in soup.find_all("source"):
+                src = tag.get("src") or ""
+                if src.startswith("http") or any(d in src for d in DOMINIOS_REMOTOS):
+                    tag["src"] = ruta_rel
+                    log(f"  [html] <source> remoto reemplazado → {ruta_rel}")
+                    modificado = True
 
     if modificado:
         html_path.write_text(soup.prettify(), encoding="utf-8")
@@ -604,6 +639,17 @@ def resolver_leccion_dir(curso_slug: str, leccion_slug: str) -> Path:
     return ruta_exacta
 
 
+def _marcar_completa(centinela: Path, url: str):
+    """Crea el archivo centinela que indica que la leccion se descargo completamente."""
+    from datetime import datetime
+    centinela.write_text(
+        f"descarga_completa\n"
+        f"fecha : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"url   : {url}\n",
+        encoding="utf-8"
+    )
+
+
 def procesar_leccion(session: requests.Session, url: str) -> bool:
     """
     Devuelve True si la lección fue procesada (nueva o video completado),
@@ -613,18 +659,19 @@ def procesar_leccion(session: requests.Session, url: str) -> bool:
     leccion_dir = resolver_leccion_dir(curso_slug, leccion_slug)
 
     # ── Chequeo previo: ¿ya está descargada? ──────────────────────────────────
-    if (leccion_dir / "index.html").exists():
-        if not _video_pendiente(leccion_dir, curso_slug):
-            log(f"\n{'─'*60}")
-            log(f"[ya descargada] {leccion_slug}  ({url})")
-            log(f"  → Saltando. Borrá la carpeta si querés volver a descargarla:")
-            log(f"     {leccion_dir}")
-            return False
-
-        # HTML existe pero falta el video — completar solo la descarga de video
+    centinela = leccion_dir / "_descarga_completa.txt"
+    if centinela.exists():
         log(f"\n{'─'*60}")
-        log(f"[completando video] {leccion_slug}  ({url})")
-        log(f"  → index.html existe pero el video no está. Descargando...")
+        log(f"[ya descargada] {leccion_slug}  ({url})")
+        log(f"  → Saltando. Borrá la carpeta si querés volver a descargarla:")
+        log(f"     {leccion_dir}")
+        return False
+
+    # No hay centinela — puede ser lección nueva o descarga incompleta
+    if (leccion_dir / "index.html").exists():
+        log(f"\n{'─'*60}")
+        log(f"[descarga incompleta] {leccion_slug}  ({url})")
+        log(f"  → Falta el centinela _descarga_completa.txt. Reintentando...")
         raw_path = leccion_dir / "index_raw.html"
         if raw_path.exists():
             html_raw = raw_path.read_text(encoding="utf-8")
@@ -635,6 +682,7 @@ def procesar_leccion(session: requests.Session, url: str) -> bool:
             soup, html_raw = procesar_html_y_adjuntos(session, url, leccion_dir)
         videos_descargados = descargar_video(soup, html_raw, url, curso_slug, nombre_video)
         reescribir_videos_en_html(leccion_dir, videos_descargados)
+        _marcar_completa(centinela, url)
         return True
 
     log(f"\n{'─'*60}")
@@ -646,6 +694,7 @@ def procesar_leccion(session: requests.Session, url: str) -> bool:
     soup, html_raw = procesar_html_y_adjuntos(session, url, leccion_dir)
     videos_descargados = descargar_video(soup, html_raw, url, curso_slug, nombre_video)
     reescribir_videos_en_html(leccion_dir, videos_descargados)
+    _marcar_completa(centinela, url)
     return True
 
 
