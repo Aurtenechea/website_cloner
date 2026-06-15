@@ -15,7 +15,7 @@ COOKIES_FILE = BASE_DIR / "cookies.txt"
 # LINKS_FILE se genera dinámicamente desde la URL del curso en main()
 
 # Pegá acá la URL de la página de índice del curso
-URL_INDICE = "https://cresciente.net/cursos/ciclo-0-primeros-pasos-en-la-composicion-musical-v3-0"
+URL_INDICE = "https://cresciente.net/cursos/s-composicion-y-escritura-para-bateria/"
 # ──────────────────────────────────────────────────────────────────────────────
 
 

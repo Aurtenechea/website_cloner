@@ -15,13 +15,14 @@ class SinAccesoError(Exception):
 # Carpeta donde se guardan los cursos descargados.
 # Si se deja vacío (""), se usa la misma carpeta donde está este script.
 # DESTINO = r""
-DESTINO = r"D:\nacho\cursos_descargados"
+#DESTINO = r"D:\nacho\cursos_descargados"
+DESTINO = r"C:\cursos_descargados"
 
 SCRIPT_DIR    = Path(__file__).parent                              # siempre la carpeta del script
 CURSOS_DIR    = Path(DESTINO) if DESTINO.strip() else SCRIPT_DIR  # donde van los cursos
 
 COOKIES_FILE  = SCRIPT_DIR / "cookies.txt"
-LINKS_FILE    = SCRIPT_DIR / "links.txt"
+LINKS_FILE    = SCRIPT_DIR / "links_curso_cc_armonia_aplicada_al_piano.txt"
 LOG_FILE      = SCRIPT_DIR / "log.txt"
 FALLIDAS_FILE = SCRIPT_DIR / "fallidas.txt"
 DELAY         = 2

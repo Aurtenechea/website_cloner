@@ -6,11 +6,12 @@ from urllib.parse import urlparse, urljoin, unquote
 from datetime import datetime
 
 # ── Configuración ──────────────────────────────────────────────────────────────
-CURSOS_DIR   = Path(r"D:\nacho\cursos_descargados")
+# CURSOS_DIR   = Path(r"D:\nacho\cursos_descargados")
+CURSOS_DIR   = Path(r"C:\cursos_descargados")
 COOKIES_FILE = Path(r"C:\mis_sitios_descargados\cookies.txt")
 
 # URL del índice del curso a ordenar
-URL_CURSO = "https://cresciente.net/cursos/cc1-e-contrapunto-por-especies/"
+URL_CURSO = "https://cresciente.net/cursos/audioperceptiva-i/"
 # ──────────────────────────────────────────────────────────────────────────────
 
 PREFIJO_RE = re.compile(r'^\d+_')
