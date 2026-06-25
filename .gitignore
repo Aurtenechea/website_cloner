@@ -7,6 +7,11 @@ log*
 links*
 contexto*
 tar
+*.txt
+
+# ignorar ciertos comandos de ps
+borrar_conflictivas_ampliando_el_lenguaje.ps1
+borrar_conflictivas_fundamentos_del_oficio.ps1
 
 # Ignorar caché de Python
 __pycache__/

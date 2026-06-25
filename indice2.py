@@ -10,12 +10,76 @@ from datetime import datetime
 import re
 
 # ── Configuración ──────────────────────────────────────────────────────────────
+# BASE_DIR     = Path(r"C:\mis_sitios_descargados\borrar")
 BASE_DIR     = Path(r"C:\mis_sitios_descargados")
 COOKIES_FILE = BASE_DIR / "cookies.txt"
-# LINKS_FILE se genera dinámicamente desde la URL del curso en main()
 
-# Pegá acá la URL de la página de índice del curso
-URL_INDICE = "https://cresciente.net/cursos/s-composicion-y-escritura-para-bateria/"
+# ── LISTA DE URLs DE CURSOS (hardcodeadas) ──────────────────────────────────
+# Comenta/descomenta las líneas para elegir qué cursos procesar.
+URLS_CURSOS = [
+    # "https://cresciente.net/cursos/cc1-e-contrapunto-por-especies",
+    # "https://cresciente.net/cursos/ciclo-1-fundamentos-del-oficio-v3-0",
+    # "https://cresciente.net/cursos/ciclo-2-ampliando-el-lenguaje",
+    # "https://cresciente.net/cursos/2022-intensivo-armonia-aplicada-a-la-guitarra-2",
+    # "https://cresciente.net/cursos/armonia-aplicada-a-la-guitarra-1-guitarra-funcional",
+    # "https://cresciente.net/cursos/armonia-modal-aplicada-a-la-composicion",
+    # "https://cresciente.net/cursos/armonia-modal-que-es-y-como-usarla-en-tus-composiciones-06-2",
+    # "https://cresciente.net/cursos/armonia-moderna-1-las-bases",
+    # "https://cresciente.net/cursos/armonia-moderna-2-de-la-armonia-modal-al-cromatismo-funcional-05-21",
+    # "https://cresciente.net/cursos/c1c-voz-y-cuerpo",
+    # "https://cresciente.net/cursos/cc0-a-sistema-de-estudio-y-organizacion",
+    # "https://cresciente.net/cursos/de-la-teoria-al-diapason-entendiendo-la-guitarra-09-25",
+    # "https://cresciente.net/cursos/experimentos-creativos",
+    # "https://cresciente.net/cursos/musescore",
+    # "https://cresciente.net/cursos/s-como-analizar-una-cancion",
+    # "https://cresciente.net/cursos/s-crear-musica-con-conceptos-simples-02-25",
+    # "https://cresciente.net/cursos/seminario-el-fagot-historia-posibilidades-y-nuevas-perspectivas",
+    # "https://cresciente.net/cursos/seminario-introduccion-a-la-armonia-del-jazz-y-sus-ramificaciones",
+    # "https://cresciente.net/cursos/seminario-partitura",
+    # "https://cresciente.net/cursos/seminario-planificacion-en-una-pieza-musical",
+    # "https://cresciente.net/cursos/seminario-rock-estilo-composicion-y-arreglo",
+    # "https://cresciente.net/cursos/teoria-musical-basica-en-50-lecciones",
+    # "https://cresciente.net/cursos/teoria-musical-basica-en-capsulas",
+    # "https://cresciente.net/cursos/termina-tus-canciones-02-26",
+
+
+
+# descargados
+"https://cresciente.net/cursos/cc1-e-contrapunto-por-especies",
+"https://cresciente.net/cursos/ciclo-0-primeros-pasos-en-la-composicion-musical-v3-0",
+"https://cresciente.net/cursos/ciclo-1-fundamentos-del-oficio-v3-0",
+"https://cresciente.net/cursos/armonia-modal-aplicada-a-la-composicion",
+"https://cresciente.net/cursos/ciclo-2-ampliando-el-lenguaje",
+"https://cresciente.net/cursos/lecto-escritura-musical-i",
+"https://cresciente.net/cursos/introduccion-a-la-produccion-musical",
+"https://cresciente.net/cursos/cc-armonia-aplicada-al-piano",
+"https://cresciente.net/cursos/seminario-introduccion-al-arreglo-musical",
+"https://cresciente.net/cursos/audioperceptiva-i"
+
+#nuevos
+# "https://cresciente.net/cursos/2022-intensivo-armonia-aplicada-a-la-guitarra-2",
+# "https://cresciente.net/cursos/armonia-aplicada-a-la-guitarra-1-guitarra-funcional",
+# "https://cresciente.net/cursos/armonia-modal-que-es-y-como-usarla-en-tus-composiciones-06-2",
+# "https://cresciente.net/cursos/armonia-moderna-1-las-bases",
+# "https://cresciente.net/cursos/armonia-moderna-2-de-la-armonia-modal-al-cromatismo-funcional-05-21",
+# "https://cresciente.net/cursos/c1c-voz-y-cuerpo",
+# "https://cresciente.net/cursos/cc0-a-sistema-de-estudio-y-organizacion",
+# "https://cresciente.net/cursos/de-la-teoria-al-diapason-entendiendo-la-guitarra-09-25",
+# "https://cresciente.net/cursos/experimentos-creativos",
+# "https://cresciente.net/cursos/musescore",
+# "https://cresciente.net/cursos/s-como-analizar-una-cancion",
+# "https://cresciente.net/cursos/s-crear-musica-con-conceptos-simples-02-25",
+# "https://cresciente.net/cursos/seminario-el-fagot-historia-posibilidades-y-nuevas-perspectivas",
+# "https://cresciente.net/cursos/seminario-introduccion-a-la-armonia-del-jazz-y-sus-ramificaciones",
+# "https://cresciente.net/cursos/seminario-partitura",
+# "https://cresciente.net/cursos/seminario-planificacion-en-una-pieza-musical",
+# "https://cresciente.net/cursos/seminario-rock-estilo-composicion-y-arreglo",
+# "https://cresciente.net/cursos/teoria-musical-basica-en-50-lecciones",
+# "https://cresciente.net/cursos/teoria-musical-basica-en-capsulas",
+# "https://cresciente.net/cursos/termina-tus-canciones-02-26"
+
+
+]
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -389,14 +453,14 @@ def extraer_links_lecciones(url_indice: str) -> list[str]:
     return lecciones_encontradas
 
 
-def guardar_en_links_txt(urls: list[str]):
+def guardar_en_links_txt(urls: list[str], links_file: Path):
     if not urls:
         print("\nNo hay lecciones para guardar.")
         return
 
     existentes = set()
-    if LINKS_FILE.exists():
-        for line in LINKS_FILE.read_text(encoding="utf-8").splitlines():
+    if links_file.exists():
+        for line in links_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 existentes.add(line)
@@ -404,42 +468,51 @@ def guardar_en_links_txt(urls: list[str]):
     nuevas = [u for u in urls if u not in existentes]
 
     if not nuevas:
-        print(f"\nTodos los links ya estaban en {LINKS_FILE.name} — nada nuevo que agregar.")
+        print(f"\nTodos los links ya estaban en {links_file.name} — nada nuevo que agregar.")
         return
 
-    with open(LINKS_FILE, "a", encoding="utf-8") as f:
+    with open(links_file, "a", encoding="utf-8") as f:
         f.write(f"\n# Agregado el {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} desde índice\n")
         for url in nuevas:
             f.write(url + "\n")
 
-    print(f"\n  [ok] {len(nuevas)} lecciones nuevas agregadas a {LINKS_FILE.name}")
+    print(f"\n  [ok] {len(nuevas)} lecciones nuevas agregadas a {links_file.name}")
     if existentes:
         print(f"  [info] {len(urls) - len(nuevas)} ya existían y se omitieron")
     print(f"\nAhora podés correr descargar.py para bajar todas las lecciones.")
 
 
 def main():
-    if "NOMBRE-DEL-CURSO" in URL_INDICE:
-        print("⚠  Editá la variable URL_INDICE en el script con la URL real del curso.")
+    if not URLS_CURSOS:
+        print("⚠  La lista URLS_CURSOS está vacía. Agregá al menos una URL.")
         return
 
-    # Derivar nombre del archivo desde el slug del curso en la URL
-    from urllib.parse import urlparse
-    partes = urlparse(URL_INDICE).path.strip("/").split("/")
-    curso_slug_archivo = ""
-    for i, p in enumerate(partes):
-        if p in ("courses", "cursos", "curso") and i + 1 < len(partes):
-            curso_slug_archivo = partes[i + 1]
-            break
-    if not curso_slug_archivo and partes:
-        curso_slug_archivo = partes[-1]
-    nombre_archivo = "links_curso_" + curso_slug_archivo.replace("-", "_") + ".txt"
-    global LINKS_FILE
-    LINKS_FILE = BASE_DIR / nombre_archivo
-    print(f"  [links] Archivo de salida: {nombre_archivo}")
+    for url_curso in URLS_CURSOS:
+        if not url_curso.strip():
+            continue
+        print(f"\n{'═'*60}")
+        print(f"  Procesando: {url_curso}")
+        print(f"{'═'*60}")
 
-    urls = extraer_links_lecciones(URL_INDICE)
-    guardar_en_links_txt(urls)
+        # Derivar nombre del archivo desde el slug del curso en la URL
+        partes = urlparse(url_curso).path.strip("/").split("/")
+        curso_slug_archivo = ""
+        for i, p in enumerate(partes):
+            if p in ("courses", "cursos", "curso") and i + 1 < len(partes):
+                curso_slug_archivo = partes[i + 1]
+                break
+        if not curso_slug_archivo and partes:
+            curso_slug_archivo = partes[-1]
+        nombre_archivo = "links_curso_" + curso_slug_archivo.replace("-", "_") + ".txt"
+        links_file = BASE_DIR / nombre_archivo
+        print(f"  [links] Archivo de salida: {nombre_archivo}")
+
+        urls = extraer_links_lecciones(url_curso)
+        guardar_en_links_txt(urls, links_file)
+
+    print(f"\n{'═'*60}")
+    print("  Procesamiento completado.")
+    print(f"{'═'*60}")
 
 
 if __name__ == "__main__":
