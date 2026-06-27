@@ -170,7 +170,54 @@ def extraer_materiales(soup: BeautifulSoup, leccion_dir: Path) -> list[dict]:
     return mats
 
 
-def extraer_contenido(soup: BeautifulSoup) -> str:
+
+def resolver_link_leccion(href: str, leccion_dir: Path, cursos_dir: Path) -> str | None:
+    """
+    Dado un link a una lección en cresciente.net, intenta resolverlo
+    a una ruta relativa local apuntando al visor.html correspondiente.
+    Busca en toda la estructura de cursos_dir.
+    Retorna la ruta relativa o None si no se encuentra.
+    """
+    from urllib.parse import urlparse, unquote
+    parsed = urlparse(href)
+    path = parsed.path.rstrip("/")
+    partes = path.strip("/").split("/")
+
+    # Extraer curso-slug y leccion-slug
+    try:
+        idx_cursos = next(i for i, p in enumerate(partes) if p in ("cursos", "curso"))
+        curso_slug = partes[idx_cursos + 1]
+        idx_lec = partes.index("lecciones")
+        leccion_slug = unquote(partes[idx_lec + 1])
+    except (StopIteration, ValueError, IndexError):
+        return None
+
+    # Buscar la carpeta del curso
+    curso_dir_target = cursos_dir / curso_slug
+    if not curso_dir_target.exists():
+        return None
+
+    # Buscar la carpeta de la lección
+    carpeta = carpeta_para_slug(leccion_slug, curso_dir_target)
+    if not carpeta:
+        return None
+
+    visor = carpeta / "visor.html"
+    if not visor.exists():
+        return None
+
+    # Calcular ruta relativa desde leccion_dir hasta el visor
+    try:
+        rel = visor.relative_to(leccion_dir.parent.parent)
+        # leccion_dir está en cursos_dir/curso/leccion/
+        # visor está en cursos_dir/curso_target/leccion_target/visor.html
+        # ruta relativa: desde leccion_dir subir dos niveles y bajar
+        rel = Path("../..") / curso_slug / carpeta.name / "visor.html"
+        return str(rel).replace("\\", "/")
+    except Exception:
+        return None
+
+def extraer_contenido(soup: BeautifulSoup, leccion_dir: Path = None, cursos_dir: Path = None) -> str:
     contenedor = soup.find(class_="learndash_content_wrap")
     if not contenedor:
         contenedor = (
@@ -208,7 +255,16 @@ def extraer_contenido(soup: BeautifulSoup) -> str:
 
     for a in contenedor.find_all("a", href=True):
         href = a["href"]
-        if href.startswith("http") and "materiales/" not in href:
+        if not href.startswith("http"):
+            continue
+        # Intentar resolver links a otras lecciones localmente
+        if "/lecciones/" in href and leccion_dir and cursos_dir:
+            local = resolver_link_leccion(href, leccion_dir, cursos_dir)
+            if local:
+                a["href"] = local
+                a["class"] = a.get("class", []) + ["link-local"]
+                continue
+        if "materiales/" not in href:
             a["target"] = "_blank"
             a["class"] = a.get("class", []) + ["link-externo"]
 
@@ -483,11 +539,6 @@ body {
   background: #000;
 }
 
-/* Eliminar padding-top del contenedor que genera espacio en blanco */
-#contenido-leccion div[style*="padding-top:56.25%"] {
-  padding-top: 0 !important;
-}
-
 #contenido-leccion figure {
   margin: 16px 0;
 }
@@ -504,6 +555,16 @@ body {
 
 #contenido-leccion a.link-externo::after {
   content: " ↗";
+  font-size: 0.75em;
+  opacity: 0.7;
+}
+
+#contenido-leccion a.link-local {
+  color: var(--accent);
+}
+
+#contenido-leccion a.link-local::after {
+  content: " →";
   font-size: 0.75em;
   opacity: 0.7;
 }
@@ -678,7 +739,7 @@ def generar_visor(leccion_dir: Path, curso_dir: Path) -> bool:
     titulo        = extraer_titulo(soup)
     nombre_curso  = extraer_nombre_curso(soup)
     comentarios    = extraer_comentarios(soup)   # antes de extraer_contenido (que hace decompose)
-    contenido_html = extraer_contenido(soup)
+    contenido_html = extraer_contenido(soup, leccion_dir=leccion_dir, cursos_dir=CURSOS_DIR)
     sidebar_items  = extraer_sidebar_items(soup, curso_dir, leccion_dir)
     materiales     = extraer_materiales(soup, leccion_dir)
 
