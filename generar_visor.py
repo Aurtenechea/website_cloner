@@ -171,6 +171,28 @@ def extraer_materiales(soup: BeautifulSoup, leccion_dir: Path) -> list[dict]:
 
 
 
+
+def resolver_link_curso(href: str, cursos_dir: Path) -> str | None:
+    """
+    Dado un link a la portada de un curso en cresciente.net,
+    lo resuelve a la ruta relativa local del visor_curso.html.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(href)
+    partes = parsed.path.strip("/").split("/")
+    try:
+        idx = next(i for i, p in enumerate(partes) if p in ("cursos", "curso"))
+        curso_slug = partes[idx + 1]
+    except (StopIteration, IndexError):
+        return None
+
+    visor = cursos_dir / curso_slug / "visor_curso.html"
+    if not visor.exists():
+        return None
+
+    # Ruta relativa: desde leccion_dir (cursos_dir/curso/leccion/) subir dos niveles
+    return f"../../{curso_slug}/visor_curso.html"
+
 def resolver_link_leccion(href: str, leccion_dir: Path, cursos_dir: Path) -> str | None:
     """
     Dado un link a una lección en cresciente.net, intenta resolverlo
@@ -253,10 +275,13 @@ def extraer_contenido(soup: BeautifulSoup, leccion_dir: Path = None, cursos_dir:
                 if "partitura" not in existing:
                     fig["class"] = existing + ["partitura"]
 
+    EXT_DESCARGA = {".pdf", ".mscz", ".zip", ".docx", ".xlsx", ".mp3", ".pptx"}
+
     for a in contenedor.find_all("a", href=True):
         href = a["href"]
         if not href.startswith("http"):
             continue
+
         # Intentar resolver links a otras lecciones localmente
         if "/lecciones/" in href and leccion_dir and cursos_dir:
             local = resolver_link_leccion(href, leccion_dir, cursos_dir)
@@ -264,6 +289,30 @@ def extraer_contenido(soup: BeautifulSoup, leccion_dir: Path = None, cursos_dir:
                 a["href"] = local
                 a["class"] = a.get("class", []) + ["link-local"]
                 continue
+
+        # Intentar resolver links a portadas de cursos
+        if "/cursos/" in href and "/lecciones/" not in href and cursos_dir:
+            local = resolver_link_curso(href, cursos_dir)
+            if local:
+                a["href"] = local
+                a["class"] = a.get("class", []) + ["link-local"]
+                continue
+
+        # Intentar resolver links a archivos descargables (wp-content/uploads)
+        # que pueden estar descargados localmente en la carpeta materiales/
+        if leccion_dir and "cresciente.net" in href and "wp-content/uploads" in href:
+            from urllib.parse import urlparse as _urlparse
+            ext = Path(_urlparse(href).path).suffix.lower()
+            if ext in EXT_DESCARGA:
+                nombre_archivo = Path(_urlparse(href).path).name
+                local_path = leccion_dir / "materiales" / nombre_archivo
+                if local_path.exists():
+                    a["href"] = f"materiales/{nombre_archivo}"
+                    a["class"] = a.get("class", []) + ["link-local"]
+                    # Quitar target="_blank" si ya estaba puesto
+                    a.attrs.pop("target", None)
+                    continue
+
         if "materiales/" not in href:
             a["target"] = "_blank"
             a["class"] = a.get("class", []) + ["link-externo"]
